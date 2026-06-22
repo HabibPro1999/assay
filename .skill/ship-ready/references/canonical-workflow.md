@@ -1,86 +1,99 @@
-# Canonical Workflow
+# Canonical Workflow (v2)
 
-The template for the single autonomous Workflow ship-ready launches after the grill. ship-ready **authors
-this script fresh each run**, inlining the PRD path + the systems-touched targets as literals in the INPUTS
-block — it does **not** rely on the Workflow `args` channel, which crashes the script the instant it arrives
-stringified or empty. The script is **resumable** (the same script replays cached agent results, so a
-`needs-human` bounce resumes rather than restarts), and since it can't read files itself, it passes
-`prdPath` to the agents (Plan, Cover, ship-gate), which read the PRD.
+The single autonomous Workflow ship-ready launches after the grill. **v2 is a rearchitecture** driven by
+measured waste on a real run (a 3.7M-token, 2-hour build whose loop re-scanned a clean feature three times).
+The redesign is built on six load-bearing decisions, each tied to evidence:
 
-This is a **template to adapt**, not a frozen script. The review→triage→fix block is **spliced from the
-`workflow-review-phase` skill** — invoke `Skill({ skill: 'workflow-review-phase' })` while authoring and
-paste its segment at the marked point, rather than hand-rolling reviewers. Keep its validated mechanics:
-thermo-nuclear runs as a real `Skill` call inside one phase-agent; code-review is the script's own
-`parallel()` fan-out (phase-agents cannot spawn subagents).
+1. **Two clocks, not one loop.** Correctness+completeness *converge fast and must gate*; maintainability/DRY
+   is *bottomless and must not gate*. They are split into **Mechanism A** (a blocking convergence loop) and
+   **Mechanism B** (one non-blocking advisory polish pass).
+2. **No Adapt phase (single-repo).** The `ProjectProfile` is detected at **intake** (the inline agent is
+   already reading the repo to grill) and **inlined as config**. A lean per-target Adapt survives only for
+   multi-repo targets the inline stage didn't profile.
+3. **Delta- and surface-scoped review.** Lap 1 runs the focused fan-out; lap 2+ reviews **only the files the
+   last fix changed**, with **only the lenses whose surface those files touch**.
+4. **Incremental triage with memory.** A `disposed` cache carries verdicts across passes; only *new* findings
+   reach triage. (On the studied run the same false positive was re-found 3× and wrongly accepted on lap 3 —
+   memory prevents both.)
+5. **Test-backed completeness + a mechanical, N/A-aware gate.** Each EARS AC carries ≥1 tagged assertion;
+   "complete" = the AC-tagged tests pass, folded into the gate. The script computes `green`; a command that
+   doesn't exist is `not-applicable` (never blocks), an env-blocked tier-0 is `failed` (never silently green).
+6. **Reality-anchored lenses.** A lens is only as good as its oracle. Keep the lenses that judge the code
+   against *execution semantics*; cut the ones anchored on lagging artifacts (`prior-prs`, `code-comments`),
+   re-anchor convention-checking from CLAUDE.md to **the sibling code** and move it to *prevention* in Implement.
 
-## Model tiers (a prior — the orchestrator reassesses per phase, per target)
+> **Frozen mechanism + config.** The orchestrator fills **only the CONFIG block** (PRD path, targets+profiles,
+> contracts, caps) and pastes the rest **verbatim**. The loop, the exit predicate, the disposition cache, the
+> delta-derivation, and the gate computation are tested mechanism — re-deriving them per run is what produced
+> the historical footguns (the `args`-channel crash, the `[].every()` trap, the skipped-vs-N/A gate bug).
+> The `review→triage→fix` interior is still **spliced from `workflow-review-phase`**; keep its two validated
+> mechanics: thermo-nuclear is a real `Skill` call in one phase-agent, code-review is the script's own
+> `parallel()` fan-out (phase-agents can't spawn subagents).
+
+## Model tiers (a prior — reassess per phase × blast-radius)
 
 | Phase | Prior | Why |
 |---|---|---|
-| Adapt | sonnet | Detection is mechanical-ish; cheap. |
-| Plan · contract/unified | **opus** | Cross-cutting design; the seam decisions are costly to get wrong. |
-| Plan · per-target sub-plan | sonnet | Conform to a frozen contract + local conventions. |
-| Research | sonnet (+ Context7) | Synthesis of docs against conventions. |
-| Implement | sonnet | Competent codegen from a precise plan. |
-| Review · security / concurrency / integration | **opus** | Subtle, high-stakes reasoning. |
-| Review · other lenses | sonnet | Breadth. |
-| Triage | **opus** | The gate — decides what actually changes. |
-| Fix | sonnet (escalate on repeated criticals) | Implementation from a precise finding. |
-| Gate / re-verify / coverage | haiku–sonnet | Runs commands, checks criteria; mostly mechanical. |
+| Plan · contract/unified | **opus** | Cross-cutting seam decisions; costly to get wrong. |
+| Plan · per-target | sonnet | Conform to a frozen contract + local conventions. |
+| Research | sonnet (+Context7) | Doc synthesis. |
+| Implement | **opus** | Codegen quality is the product; mirrors sibling code, writes AC tests. |
+| Review · security / data-integrity / concurrency | **opus** | Subtle, high-blast-radius — only on relevant surfaces, lap-1. |
+| Review · bugs / api-contract / git-history | sonnet | Breadth on the change. |
+| Triage | **opus** | The gate — decides what changes. Only *new* findings. |
+| Fix | sonnet (escalate on repeated criticals) | Implement a precise finding. |
+| Gate / re-verify | haiku | Runs commands; the **script** computes green. |
+| Polish (thermo + yagni) | sonnet–opus, **once** | Advisory; never loops. |
 | Ship-gate | **opus** | Final judgment + structured verdict. |
 
-Scale by stakes × complexity × blast-radius; in multi-repo, set per target. See the model-assessment
-heuristic in `SKILL.md`.
+## The lens roster — reality-anchored, surface-gated
+
+A lens earns its place by **(blast-radius of a miss) × (reliability of its oracle)**, gated to the surfaces
+where the miss is possible — not by raw yield. (See `adaptation-layer.md` §4 for the oracle-reliability
+ranking and the full rationale for each keep/cut.)
+
+| Bucket | Lenses | When |
+|---|---|---|
+| **Core** (change-intrinsic) | `bugs`; `api-contract` | always; `api-contract` if `api` surface |
+| **Insurance** (surface-gated, lap-1) | `security`, `data-integrity`, `concurrency` | only on auth/money/public · db/migration · txn/async surfaces |
+| **Conditional** | `git-history` | only on hunks that **modify pre-existing** code (blame is meaningless on net-new files) |
+| **Polish** (advisory, non-gating) | `thermo-nuclear`, `yagni`/`simplify`, `doc-drift` | Mechanism B, once |
+| **Cut from the gate** | ~~`prior-prs`~~, ~~`code-comments`~~, ~~`claude-md`~~ | weak/rotting oracle — see below |
+
+Convention-following is handled by **prevention** (Implement mirrors the sibling code; CLAUDE.md is a hint and
+**the code wins on conflict**), and doc/comment **drift** is surfaced as an advisory ledger note in Mechanism B
+— never as a blocking gate finding.
 
 ## Schemas
 
-Reuse `FINDINGS`, `TRIAGE`, `FIXED` verbatim from the `workflow-review-phase` skill. Add:
+Reuse `FINDINGS`, `TRIAGE`, `FIXED` verbatim from `workflow-review-phase`. Add:
 
 ```js
-const PROFILE = { /* the ProjectProfile shape from adaptation-layer.md */ }
+// A stable signature so a dispositioned finding never re-enters triage (incremental triage).
+const DISPOSITION = { type:'object', additionalProperties:false, required:['key','verdict'], properties:{
+  key:{type:'string'},                       // `${file}:${normalizedTitle}` — survives across passes
+  verdict:{ enum:['accepted','rejected'] },
+  reason:{type:['string','null']} } }
 
-const PLAN = { type:'object', additionalProperties:false,
-  required:['steps','risks','filesLikely'], properties:{
-    steps:{ type:'array', items:{ type:'string' } },
-    risks:{ type:'array', items:{ type:'string' } },
-    filesLikely:{ type:'array', items:{ type:'string' } },
-    conformsTo:{ type:['string','null'] } } }            // contract id this sub-plan implements
-
-const CONTRACT_PLAN = { type:'object', additionalProperties:false,
-  required:['contracts','sequence','crossCuttingCriteria'], properties:{
-    contracts:{ type:'array', items:{ type:'object', additionalProperties:false,
-      required:['id','between','shape'], properties:{
-        id:{type:'string'}, between:{type:'array',items:{type:'string'}},
-        shape:{type:'string'}, ownerTarget:{type:'string'} } } },
-    sequence:{ type:'array', items:{ type:'object', additionalProperties:false,
-      required:['target','dependsOn'], properties:{
-        target:{type:'string'}, dependsOn:{type:'array',items:{type:'string'}} } } },
-    crossCuttingCriteria:{ type:'array', items:{ type:'string' } } } }
-
-const COVERAGE = { type:'object', additionalProperties:false,
-  required:['covered','uncovered'], properties:{
-    covered:{ type:'array', items:{ type:'object', additionalProperties:false,
-      required:['id','evidence'], properties:{ id:{type:'string'}, evidence:{type:'string'} } } },
-    uncovered:{ type:'array', items:{ type:'object', additionalProperties:false,
-      required:['id','whatsMissing'], properties:{ id:{type:'string'}, whatsMissing:{type:'string'} } } } } }
-
-// Deliberate-simplification ledger — harvested from `ponytail:` markers (NOT findings to fix; accepted debt).
-const LEDGER = { type:'object', additionalProperties:false, required:['markers'], properties:{
-  markers:{ type:'array', items:{ type:'object', additionalProperties:false,
-    required:['location','note','ceiling','upgrade','rotRisk'], properties:{
-      location:{type:'string'},                        // file:line
-      note:{type:'string'},                            // what was deliberately kept simple
-      ceiling:{type:['string','null']},                // the named limit (global lock, O(n²), naive heuristic)
-      upgrade:{type:['string','null']},                // the trigger to revisit
-      rotRisk:{type:'boolean'} } } } }                 // true when no upgrade trigger was named
-
-// Gate REPORTS per-gate status; the script computes green from it (harness owns the gate, not the model).
+// Gate REPORTS raw status; the SCRIPT computes green. `not-applicable` ⇒ the command doesn't exist (never blocks).
 const GATE_RESULT = { type:'object', additionalProperties:false, required:['target','gates'], properties:{
   target:{type:'string'},
   gates:{ type:'array', items:{ type:'object', additionalProperties:false,
     required:['name','tier','status','detail'], properties:{
-      name:{type:'string'}, tier:{enum:[0,1,2]}, status:{enum:['passed','failed','skipped']},
-      detail:{type:'string'} } } } } }
+      name:{type:'string'}, tier:{enum:[0,1,2]},
+      status:{enum:['passed','failed','skipped','not-applicable']},   // skipped = exists-but-env-blocked
+      detail:{type:'string'} } } },
+  acTests:{ type:['object','null'], additionalProperties:false,        // completeness, folded into the gate
+    properties:{ passed:{type:'array',items:{type:'string'}},          // AC ids whose tagged tests pass
+      failing:{type:'array',items:{type:'string'}},                    // AC ids whose tests fail
+      untestable:{type:'array',items:{type:'string'}} } } } }          // ACs with no machine assertion (ship-gate judges)
+
+const LEDGER = { type:'object', additionalProperties:false, required:['markers'], properties:{
+  markers:{ type:'array', items:{ type:'object', additionalProperties:false,
+    required:['kind','location','note','rotRisk'], properties:{
+      kind:{enum:['ponytail','doc-drift','deferred-finding']},        // shortcut · stale doc/comment · deferred polish
+      location:{type:'string'}, note:{type:'string'},
+      ceiling:{type:['string','null']}, upgrade:{type:['string','null']}, rotRisk:{type:'boolean'} } } } }
 
 const SHIP_VERDICT = { type:'object', additionalProperties:false,
   required:['status','criteria','gates','perTarget','recommendation'], properties:{
@@ -90,249 +103,238 @@ const SHIP_VERDICT = { type:'object', additionalProperties:false,
         id:{type:'string'}, met:{type:'boolean'}, evidence:{type:'string'} } } },
     gates:{ type:'array', items:{ type:'object', additionalProperties:false,
       required:['name','status','detail'], properties:{
-        name:{type:'string'}, status:{enum:['passed','failed','skipped']}, detail:{type:'string'} } } },
+        name:{type:'string'}, status:{enum:['passed','failed','skipped','not-applicable']}, detail:{type:'string'} } } },
     perTarget:{ type:'array', items:{ type:'object', additionalProperties:false,
       required:['target','green','residualFindings'], properties:{
-        target:{type:'string'}, green:{type:'boolean'},
-        residualFindings:{type:'array',items:{type:'string'}} } } },
-    integration:{ type:['object','null'], additionalProperties:true },
-    simplifications:{ type:['array','null'], items:{ type:'object', additionalProperties:false,  // the harvested ledger
-      required:['location','note','ceiling','upgrade','rotRisk'], properties:{
-        location:{type:'string'}, note:{type:'string'},
+        target:{type:'string'}, green:{type:'boolean'}, residualFindings:{type:'array',items:{type:'string'}} } } },
+    simplifications:{ type:['array','null'], items:{ type:'object', additionalProperties:false,   // the LEDGER (advisory)
+      required:['kind','location','note','rotRisk'], properties:{
+        kind:{type:'string'}, location:{type:'string'}, note:{type:'string'},
         ceiling:{type:['string','null']}, upgrade:{type:['string','null']}, rotRisk:{type:'boolean'} } } },
-    risk:{ type:['string','null'] },
-    recommendation:{ type:'string' } } }
+    integration:{ type:['object','null'], additionalProperties:true },
+    risk:{ type:['string','null'] }, recommendation:{ type:'string' } } }
 ```
 
-`simplifications` is deliberate, accepted debt — *not* a residual finding. It does **not** affect the
-harness exit predicate or `status` (a clean run still ships with simplifications on the ledger); it exists so a
-`ponytail:` shortcut can't quietly become permanent. The ship-gate may still raise `risk` if the ledger holds a
-`rotRisk` entry (a shortcut with no upgrade trigger).
+`simplifications` is **accepted, tracked debt** — it does NOT affect the exit predicate or `status` (a clean
+run ships with it listed). It only keeps a deferral from silently becoming permanent.
 
 ## The script
 
 ```js
 export const meta = {
   name: 'ship-ready',
-  description: 'Autonomous delivery loop: adapt → plan → research → implement → review-loop → ship-gate',
+  description: 'Autonomous delivery: plan → research → implement → converge → polish → ship-gate',
   phases: [
-    { title: 'Adapt' }, { title: 'Plan' }, { title: 'Research' }, { title: 'Implement' },
-    { title: 'Review' }, { title: 'Triage' }, { title: 'Fix' }, { title: 'Gate' }, { title: 'Ship-gate' },
+    { title: 'Plan' }, { title: 'Research' }, { title: 'Implement' },
+    { title: 'Converge' }, { title: 'Polish' }, { title: 'Ship-gate' },
   ],
 }
 
-// ── INPUTS — the orchestrator INLINES these literals when it authors the script. Do NOT read from `args`:
-//    a fresh-authored workflow doesn't need it, and a stringified/missing `args` crashes the script on the
-//    first nested access. Inlining is also resume-safe (the same script replays identically).
-const prdPath    = '.prd/<slug>.md'           // the PRD file (agents read it; the script can't read files)
-const targets    = [                          // from the PRD's "Systems touched" — one entry per system
-  { name: '<svc>', repoPath: '/abs/path/<svc>', surfacesHint: ['api'] },
+/* ═══════════ CONFIG — the orchestrator fills ONLY this block (from intake). ═══════════
+   Everything below it is the FROZEN MECHANISM: paste verbatim. The ProjectProfile is detected at
+   INTAKE and inlined here — there is no Adapt phase for single-repo. (Multi-repo: splice a lean
+   parallel Adapt before Plan for any target whose profile isn't already inlined.) */
+const prdPath = '.prd/<slug>.md'
+const targets = [
+  { name:'<svc>', repoPath:'/abs/<svc>', surfaces:['api','db'],
+    profile:{
+      commands:{ typecheck:'…', lint:'…', format:'…', unit:'…', acTests:'…', integration:'…', verify:'…' },
+      cmdExists:{ typecheck:true, lint:true, format:false, unit:true, acTests:true, integration:true }, // false ⇒ not-applicable
+      conventions:'mirror <sibling modules>; the CODE wins over CLAUDE.md on conflict',
+      fileLensMap:[ ['controller', ['api-contract','security']], ['schema', ['data-integrity']],
+                    ['migration', ['data-integrity']], ['', ['bugs']] ],          // path-substr → lenses
+      buildsClean:true } },
 ]
-const multiRepo  = targets.length > 1
-const CAP        = 3                            // Standard rigor: max loop iterations
-const byName     = (arr, k='target') => Object.fromEntries(arr.filter(Boolean).map(x => [x[k], x]))
+const contracts = []                                   // multi-repo seams (Plan derives); [] single-repo
+const sequence  = [{ target: targets[0].name, dependsOn: [] }]
+const CAP_A  = 4                                        // correctness-convergence backstop (predicate exits first)
+const POLISH = 1                                        // maintainability passes — hard cap, NON-blocking
 
-// ── ADAPT ── detect a ProjectProfile per target (single-repo ⇒ one) ──────────
-// Resilient: retry a transient failure, then fall back to a conservative profile rather than aborting the
-// whole run. A fallback has empty `commands` → the gate can't go green → the run ends `blocked`, never
-// crashed and never falsely green. (agent() already retries terminal API errors; this guards the null it
-// returns after a sustained overload — one blip must not nuke a multi-minute build.)
-phase('Adapt')
-const adaptPrompt = t =>
-  `Detect the ProjectProfile for the repo at ${t.repoPath} (surfaces hint: ${t.surfacesHint}). `
-  + `Follow adaptation-layer.md: read CI as the source of truth for commands, detect stack/monorepo/`
-  + `conventions/surfaces, and select review lenses from the surface→lens table. Run the repo-integrity `
-  + `preflight: resolve imports of the files the change touches and record any referenced-but-absent `
-  + `module/config in preflightWarnings (these become in-scope work — never plan as if a non-building tree `
-  + `compiles). Return the profile.`
-const fallbackProfile = t => ({
-  target: t.name, stack: { language: 'unknown' }, commands: {},          // empty commands ⇒ gate can't pass
-  surfaces: t.surfacesHint ?? [], lenses: ['bugs', 'claude-md', 'security'],
-  preflightWarnings: [`Adapt could not profile ${t.name} (transient failure) — using a fallback; the run will block until verified`],
-})
-const profiles = byName(await parallel(targets.map(t => async () => {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const p = await agent(adaptPrompt(t), { label:`adapt:${t.name}`, phase:'Adapt', model:'sonnet', schema: PROFILE })
-    if (p) return { ...p, target: t.name }
-  }
-  log(`adapt:${t.name} failed after retries — using fallback profile (run will end blocked, not crashed)`)
-  return fallbackProfile(t)                                              // never throw; degrade instead
-})))
+/* ═══════════ FROZEN MECHANISM (paste verbatim) ═══════════ */
+const multiRepo = targets.length > 1
+const byName = (a, k='target') => Object.fromEntries(a.filter(Boolean).map(x => [x[k], x]))
+async function aretry(prompt, opts, tries=3) {        // one transient 529 must not abort a multi-minute build
+  let r = null
+  for (let i=0;i<tries;i++){ r = await agent(i? `${prompt}\n\n(retry ${i+1}/${tries} after empty result)`:prompt, opts); if (r) return r }
+  return r
+}
+// reality-anchored, surface-gated lens selection
+const SURFACE_LENS = { api:['api-contract','security'], db:['data-integrity'], async:['concurrency'],
+  infra:['security'], ui:['a11y'] }
+function lensesFor(surfaces, opusKeys=new Set(['security','concurrency','data-integrity'])) {
+  const base = ['bugs']
+  const add = surfaces.flatMap(s => SURFACE_LENS[s] || [])
+  return [...new Set([...base, ...add])].map(k => ({ key:k, model: opusKeys.has(k)?'opus':'sonnet' }))
+}
+function lensesForFiles(changedFiles, profile) {       // delta laps: only lenses whose surface the change touches
+  const keys = new Set(['bugs'])
+  for (const f of changedFiles) for (const [sub, ls] of profile.fileLensMap) if (sub==='' || f.includes(sub)) ls.forEach(k=>keys.add(k))
+  const opus = new Set(['security','concurrency','data-integrity'])
+  return [...keys].map(k => ({ key:k, model: opus.has(k)?'opus':'sonnet' }))
+}
+const dispKey = f => `${f.file}:${(f.title||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim().slice(0,80)}`
 
-// ── PLAN ── thin unified contract plan, then conforming per-target sub-plans ──
+// ── PLAN ── (multi-repo: contracts+DAG first, then per-target) ──────────────────
 phase('Plan')
-const contractPlan = multiRepo
-  ? await agent(
-      `Read the PRD at ${prdPath}. Produce the UNIFIED contract/sequencing plan across targets `
-    + `${targets.map(t=>t.name)}: own ONLY the seams — freeze each contract's shape, list the cross-cutting `
-    + `acceptance criteria, and emit the dependency sequence (what must precede what; contract-bearing changes `
-    + `first). The PRD gives WHAT and which systems; you derive the technical contracts + DAG here.`,
-      { label:'plan:contract', phase:'Plan', model:'opus', effort:'high', schema: CONTRACT_PLAN })
-  : { contracts:[], sequence:[{target:targets[0].name, dependsOn:[]}], crossCuttingCriteria:[] }
+const plan = await aretry(
+  `Read the PRD at ${prdPath}. Produce the implementation plan for ${targets.map(t=>t.name)}. Conform to each `
++ `repo's conventions (mirror the sibling modules named in its profile; the CODE is the convention oracle — `
++ `if CLAUDE.md conflicts with the prevailing code pattern, follow the code and note the doc drift). `
++ (multiRepo ? `Freeze the cross-target contracts ${JSON.stringify(contracts)} and the dependency sequence first. ` : ``)
++ `CRITICAL: map EACH acceptance criterion (AC id) to at least one concrete test assertion to write in Implement; `
++ `where the stack genuinely cannot assert a criterion, mark it untestable (the ship-gate will judge it).`,
+  { label:'plan', phase:'Plan', model:'opus', effort:'high', schema: PLAN })
 
-const subPlans = byName(await parallel(targets.map(t => () =>
-  agent(`Plan the implementation for target ${t.name}. Read the PRD at ${prdPath} for scope + acceptance `
-      + `criteria. Conform to the frozen contracts ${JSON.stringify(contractPlan.contracts)} and to this `
-      + `repo's conventions (${profiles[t.name]?.conventions}).`,
-    { label:`plan:${t.name}`, phase:'Plan', model:'sonnet', schema: PLAN }).then(p => ({...p, target:t.name})))))
-
-// ── RESEARCH ── best practices for the libs in use, reconciled with conventions ─
+// ── RESEARCH ── current best practices for the libs actually in use ─────────────
 phase('Research')
-const research = byName(await parallel(targets.map(t => () =>
-  agent(`For target ${t.name} (${profiles[t.name]?.stack?.frameworks}), use Context7 `
-      + `(mcp__plugin_context7_context7__*) to pull current best practices for the libraries this change `
-      + `touches, plus web where needed. Reconcile with the repo's existing patterns; return concise guidance.`,
-    { label:`research:${t.name}`, phase:'Research', model:'sonnet' }).then(r => ({ target:t.name, notes:r })))))
+const research = await aretry(
+  `Via Context7 (mcp__plugin_context7_context7__*) + web where needed, pull current best practices for the `
++ `libraries this change touches; reconcile with the repo's existing patterns. Concise, actionable.`,
+  { label:'research', phase:'Research', model:'sonnet' })
 
-// ── IMPLEMENT ── DAG-ordered; independents in parallel, dependents sequenced ───
+// ── IMPLEMENT ── DAG order; lazy build; mirror sibling code; AC→test; ponytail markers ─
 phase('Implement')
-await implementInDagOrder(targets, contractPlan.sequence, t =>
-  agent(`Implement target ${t.name} per its sub-plan ${JSON.stringify(subPlans[t.name])} and research `
-      + `${JSON.stringify(research[t.name]?.notes)}, against the FROZEN contract. Match surrounding code and `
-      + `the repo's conventions. Write tests-first where this project is test-driven. `
-      + `Build LAZY (YAGNI) — take the simplest thing that works, stopping at the first rung that holds: does it `
-      + `need to exist at all? → stdlib → a native platform/framework feature → an already-installed dependency `
-      + `→ one line → only then new code. No unrequested abstractions (no interface with one implementation, no `
-      + `config for a value that never changes), no new dependency for what a few lines cover, fewest files. `
-      + `NEVER simplify away input validation at trust boundaries, error handling that prevents data loss, `
-      + `security, accessibility, or anything the PRD requires. Mark each deliberate shortcut with a `
-      + `\`ponytail: <ceiling>, <upgrade trigger>\` comment (e.g. \`// ponytail: global lock, per-account locks `
-      + `if throughput matters\`) so the gate can harvest it into the debt ledger. Do NOT commit. `
-      + `Work in repo ${t.repoPath}; if using a git worktree, stage with \`git add -A\` so the diff is real.`,
-    { label:`impl:${t.name}`, phase:'Implement', model:'sonnet', effort:'high',
-      isolation: multiRepo ? 'worktree' : undefined, schema: FIXED }))
+await implementInDagOrder(targets, sequence, t => aretry(
+  `Implement ${t.name} per the plan ${JSON.stringify(plan)} and research ${JSON.stringify(research)}. `
++ `MIRROR the sibling code named in conventions (${t.profile.conventions}) — the code is the oracle, CLAUDE.md a hint. `
++ `Build LAZY (YAGNI): stdlib → native → installed dep → one line → only then new code; no unrequested abstractions; `
++ `NEVER simplify away validation/error-handling/security/anything the PRD requires. Write ≥1 tagged test per AC `
++ `(name it so the gate can run AC-tagged tests). Mark deliberate shortcuts \`ponytail: <ceiling>, <upgrade>\`. `
++ `Do NOT commit. In a worktree, \`git add -A\` so the diff is real.`,
+  { label:`impl:${t.name}`, phase:'Implement', model:'opus', effort:'high',
+    isolation: multiRepo?'worktree':undefined, schema: FIXED }))
 
-// ── LOOP UNTIL CLEAN ── review → triage → fix → gate → cover; harness owns exit ─
-let iteration = 0, lastVerdictInputs = null
+// ══════════ MECHANISM A — converge correctness + completeness (BLOCKING) ══════════
+const disposed = new Map()                              // dispKey → {verdict, reason} — persists across passes
+let pass = 0, cursor = null, lastA = null
 while (true) {
-  iteration++
-  log(`loop iteration ${iteration}/${CAP}`)
+  pass++; log(`converge pass ${pass}/${CAP_A}`)
+  phase('Converge')
 
-  // Per-target review→triage→fix = the workflow-review-phase SPLICE.
-  // <<< PASTE the workflow-review-phase segment here, once per target, with:
-  //     DIFF = reDeriveDiff(t.repoPath)  VERIFY_CMD = profiles[t.name].commands.verify
-  //     LENSES = profiles[t.name].lenses  SCOPE='review+fix'  SCORE_FLOOR=null >>>
-  const perTarget = await parallel(targets.map(t => () => runReviewTailForTarget(t, profiles[t.name])))
+  // STAGE + derive the diff to review. Pass 1: whole change. Pass 2+: ONLY what the last fix changed.
+  const view = await aretry(
+    `In ${targets[0].repoPath}: \`git add -A\`, then return (a) the full staged file list, and (b) the files `
+  + (cursor ? `changed SINCE ${cursor} (the last fix).` : `(this is pass 1 — all staged files).`)
+  + ` Read-only except the add. Return {changedFiles:[...], head:'<sha>'}.`,
+    { label:`stage:${pass}`, phase:'Converge', model:'haiku', effort:'low',
+      schema:{type:'object',additionalProperties:false,required:['changedFiles','head'],
+        properties:{changedFiles:{type:'array',items:{type:'string'}},head:{type:'string'}}} })
+  const changed = (view && view.changedFiles) || []
 
-  // Multi-repo only: a cross-cutting integration lens over the seam (contract conformance).
-  const integration = multiRepo
-    ? await agent(`Integration review across targets. Verify each side conforms to the frozen contracts `
-        + `${JSON.stringify(contractPlan.contracts)} — request/response shapes, event payloads, shared types, `
-        + `versioning/back-compat. Flag concrete drift with the exact mismatch.`,
-        { label:'review:integration', phase:'Review', model:'opus', effort:'high', schema: FINDINGS })
-    : { findings: [] }
+  // REVIEW — reality-anchored, surface-gated, delta-scoped. Reviewers are told what's already dispositioned.
+  const lenses = pass===1 ? lensesFor(targets[0].surfaces) : lensesForFiles(changed, targets[0].profile)
+  const skipList = [...disposed.keys()].slice(0, 120)
+  const reviewed = await parallel(lenses.map(l => () => agent(
+    `Review ${pass===1?'the staged change':'ONLY these changed files: '+JSON.stringify(changed)} in ${targets[0].repoPath} `
+  + `through the ${l.key} lens (judge the CODE against execution semantics — not against docs/comments, which rot). `
+  + `Do NOT re-report anything matching these already-decided items: ${JSON.stringify(skipList)}. `
+  + `Empty findings is a good result; verify framework defaults before asserting (e.g. status codes).`,
+    { label:`review:${l.key}:${pass}`, phase:'Converge', model:l.model, effort:l.model==='opus'?'high':'medium', schema: FINDINGS })))
+  const fresh = reviewed.filter(Boolean).flatMap(r=>r.findings||[]).filter(f => !disposed.has(dispKey(f)))
 
-  // GATE: re-derive each diff from git (don't trust fix reports) and run the tiered gates.
-  // The agent REPORTS per-gate status; the SCRIPT computes green below (the harness owns the gate).
-  phase('Gate')
-  const gateResults = await parallel(targets.map(t => () =>
-    agent(`From ${t.repoPath}, re-derive the diff from git, then run the tiered gates for this profile `
-        + `(${JSON.stringify(profiles[t.name]?.commands)}): tier 0 always (typecheck/compile, lint, format, `
-        + `unit); tier 1/2 if present (integration, contract, e2e, UI build+smoke). FIRST confirm the target `
-        + `compiles — a typecheck/analyze failure caused by a missing imported file is a tier-0 'failed', never `
-        + `a 'skipped'. Return every gate with its tier and passed/failed/skipped-and-why. Change nothing.`,
-      { label:`gate:${t.name}`, phase:'Gate', model:'haiku', schema: GATE_RESULT })))
+  // TRIAGE — only NEW findings. Record every verdict into the disposition cache.
+  let accepted = []
+  if (fresh.length) {
+    const tri = await aretry(
+      `Triage these NEW findings against the diff in ${targets[0].repoPath}. Dedupe; drop pre-existing issues, `
+    + `nitpicks, false premises (verify the claim against the actual code/framework), and anything a typechecker/`
+    + `linter/CI catches. Keep only real, in-diff, worth-changing items. Findings:\n${JSON.stringify(fresh)}`,
+      { label:`triage:${pass}`, phase:'Converge', model:'opus', effort:'high', schema: TRIAGE })
+    accepted = (tri && tri.accepted) || []
+    for (const f of fresh) disposed.set(dispKey(f), {verdict:'rejected'})
+    for (const a of accepted) disposed.set(dispKey(a), {verdict:'accepted'})
+    if (accepted.length) {
+      phase('Converge')
+      await aretry(`Apply these accepted findings to ${targets[0].repoPath} coherently and minimally — match `
+        + `surrounding code, no new behavior. Then run \`${targets[0].profile.commands.verify}\` until tier-0 passes. Do NOT commit. `
+        + `Findings:\n${JSON.stringify(accepted)}`,
+        { label:`fix:${pass}`, phase:'Converge', model:'sonnet', effort:'high', schema: FIXED })
+    }
+  }
 
-  // COVER: completeness axis — reconcile the cumulative diff vs the EARS criteria + the always-on AC0.
-  const coverage = await agent(
-    `Read the acceptance criteria from the PRD at ${prdPath}. Reconcile the implementation against EACH AC `
-  + `(by its id) and the cross-cutting criteria ${JSON.stringify(contractPlan.crossCuttingCriteria)}, PLUS the `
-  + `always-on AC0 "the target builds and tier-0 is green". For each, decide covered (evidence: the file/test/`
-  + `endpoint that satisfies it) or uncovered (what's missing). Nothing counts as covered on a tree that does `
-  + `not compile.`,
-    { label:'cover', phase:'Gate', model:'sonnet', effort:'high', schema: COVERAGE })
+  // GATE — mechanical, N/A-aware, completeness folded in (AC-tagged tests). Agent REPORTS; script COMPUTES green.
+  const gate = await aretry(
+    `From ${targets[0].repoPath}, re-derive the diff (read-only) and run the tiered gates using ${JSON.stringify(targets[0].profile.commands)} `
+  + `and existence map ${JSON.stringify(targets[0].profile.cmdExists)}: a command that does NOT exist → status 'not-applicable'; `
+  + `a tier-0 command that exists but the env can't run → 'failed' (never 'skipped'); env-blocked tier-1 (e.g. Docker) → 'skipped'. `
+  + `ALSO run the AC-tagged tests and report, per AC id, passed / failing / untestable. Change nothing.`,
+    { label:`gate:${pass}`, phase:'Converge', model:'haiku', effort:'low', schema: GATE_RESULT })
 
-  // HARNESS-OWNED EXIT — machine-checked, fail-safe. `clean` requires POSITIVE evidence of success, so a
-  // missing/null result (a crashed or overloaded agent) reads as NOT clean — never a silent green. Note
-  // `[].every()` is `true`, so every "all passed" check is paired with a "results actually exist" check.
-  const okGates  = gateResults.filter(Boolean)
-  const okReview = perTarget.filter(Boolean)
-  const integrationFindings = (integration?.findings ?? []).length
-  const triageAccepted = okReview.reduce((n, pt) => n + (pt?.acceptedCount ?? 0), 0)
-  const reviewComplete = okReview.length === targets.length             // every target was actually reviewed
-  const gatesGreen = okGates.length === targets.length                  // every target produced a gate result…
-    && okGates.every(gr => {
-         const gs = gr.gates ?? []
-         const tier0Ran = gs.some(g => g.tier === 0 && g.status !== 'skipped')   // …with tier-0 actually run
-         return tier0Ran && gs.every(g => g.status === 'passed' || (g.status === 'skipped' && g.tier !== 0))
-       })
-  const allCovered = !!coverage && Array.isArray(coverage.uncovered)    // coverage actually ran…
-    && coverage.uncovered.length === 0                                  // …and nothing is left uncovered
-  const clean = reviewComplete && triageAccepted === 0 && integrationFindings === 0 && gatesGreen && allCovered
-
-  lastVerdictInputs = { perTarget, integration, gates: gateResults, coverage }
-  if (clean) { log('clean on both axes — exiting loop'); break }
-  if (iteration >= CAP) { log(`hit cap with residuals — verdict will be blocked`); break }
-  // else: uncovered criteria + surviving findings feed the next Fix pass (the review splice applies them).
+  // HARNESS-OWNED EXIT — fail-safe (positive evidence required; null reads as NOT clean).
+  const gs = (gate && gate.gates) || []
+  const tier0Ran = gs.some(g => g.tier===0 && g.status==='passed')
+  const gatesGreen = tier0Ran && gs.every(g => g.status==='passed' || g.status==='not-applicable' || (g.status==='skipped' && g.tier!==0))
+  const ac = gate && gate.acTests
+  const complete = !!ac && (ac.failing||[]).length===0       // untestable ACs defer to the ship-gate, don't block here
+  const clean = accepted.length===0 && gatesGreen && complete
+  lastA = { pass, gate, accepted: accepted.map(a=>a.title), disposed: disposed.size }
+  cursor = (view && view.head) || cursor
+  if (clean) { log('converged — correctness + completeness green'); break }
+  if (pass >= CAP_A) { log('hit convergence cap with residuals — verdict will be blocked'); break }
+  // else: next pass reviews ONLY the fix delta with surface-relevant lenses.
 }
 
-// ── LEDGER ── harvest deliberate `ponytail:` simplifications once, from the final diff ─
-// Accepted, on-purpose shortcuts — NOT findings to fix and NOT part of the exit predicate. Harvested at the end
-// (markers accumulate in the final tree) so a deferral can't silently become permanent.
-phase('Gate')
-const ledger = await agent(
-  `Across the targets ${JSON.stringify(targets.map(t => t.repoPath))}, grep each repo for deliberate-`
-+ `simplification markers: \`grep -rnE '(#|//|--) ?ponytail:' <repo>\`, skipping node_modules/.git/build output. `
-+ `Each hit is one ledger row: location (file:line), the note, its named ceiling and upgrade trigger (parse them `
-+ `from the \`ponytail: <ceiling>, <upgrade>\` convention). A marker that names NO upgrade trigger is a rot risk `
-+ `— set rotRisk=true. These are accepted shortcuts, not bugs; do not fix anything. Empty result ⇒ markers:[].`,
-  { label:'ledger', phase:'Gate', model:'haiku', schema: LEDGER })
+// ══════════ MECHANISM B — polish ONCE (NON-blocking, advisory) ══════════
+phase('Polish')
+let ledger = { markers: [] }
+for (let i=0;i<POLISH;i++){
+  const q = await aretry(
+    `Invoke Skill({ skill:'thermo-nuclear-code-quality-review' }) and apply the \`yagni\` lens to the FULL diff in `
+  + `${targets[0].repoPath}: find over-engineering/duplication to DELETE (delete/stdlib/native/yagni/shrink; net −lines). `
+  + `Also flag DOC-DRIFT: any CLAUDE.md rule or code comment the implementation now contradicts (the code is right — the doc is stale). `
+  + `Return findings.`,
+    { label:'polish:review', phase:'Polish', model:'opus', effort:'high', schema: FINDINGS })
+  const qa = await aretry(`Triage ${JSON.stringify((q&&q.findings)||[])}: accept only cheap, clearly-worth-it cleanups (obvious DRY extractions). Everything else is deferred, not rejected.`,
+    { label:'polish:triage', phase:'Polish', model:'sonnet', effort:'medium', schema: TRIAGE })
+  const acc = (qa&&qa.accepted)||[]
+  if (acc.length) await aretry(`Apply these cheap cleanups to ${targets[0].repoPath}, then run \`${targets[0].profile.commands.verify}\` (must stay tier-0 green). Do NOT commit. ${JSON.stringify(acc)}`,
+    { label:'polish:fix', phase:'Polish', model:'sonnet', effort:'medium', schema: FIXED })
+  const harvested = await aretry(
+    `In ${targets[0].repoPath}, grep for \`(#|//|--) ?ponytail:\` markers (skip node_modules/.git/build). Each → a ledger row `
+  + `(kind:'ponytail', location, note, ceiling, upgrade; rotRisk=true if no upgrade trigger). Add the deferred polish findings `
+  + `(kind:'deferred-finding') and the doc-drift items (kind:'doc-drift') from this evidence: ${JSON.stringify((qa&&qa.rejected)||[])}.`,
+    { label:'polish:ledger', phase:'Polish', model:'haiku', effort:'low', schema: LEDGER })
+  if (harvested && harvested.markers) ledger = harvested
+}
 
-// ── SHIP-GATE ── structured verdict the inline stage branches on ──────────────
+// ══════════ SHIP-GATE — structured verdict (explains; cannot invent green) ══════════
 phase('Ship-gate')
-const verdict = await agent(
-  `You are the ship-readiness gate. Read the PRD at ${prdPath}, then decide the verdict from the evidence. status='ship' `
-+ `ONLY if every acceptance criterion is met, all applicable gates are green (skips justified), no unresolved `
-+ `critical/high findings remain, and no new tech debt was introduced. status='blocked' if residuals remain `
-+ `after the loop cap; status='needs-human' if a criterion is contradictory or a decision exceeds the PRD. `
-+ `Set \`simplifications\` to the harvested ledger VERBATIM — these are accepted, on-purpose shortcuts, NOT a `
-+ `reason to block; a clean run ships WITH them listed. Raise \`risk\` if any ledger entry has rotRisk=true `
-+ `(a shortcut with no upgrade trigger). Be concrete: cite evidence per criterion and per gate. `
-+ `Evidence:\n${JSON.stringify({ ...lastVerdictInputs, ledger })}`,
+const verdict = await aretry(
+  `You are the ship-readiness gate. Read the PRD at ${prdPath} and decide from the evidence. status='ship' ONLY if every AC `
++ `is met (AC-tagged tests pass; judge 'untestable' ACs against the diff), all tier-0 gates are green (N/A and env-skipped `
++ `tier-1 are fine), and no unresolved critical/high finding remains. Set \`simplifications\` to the harvested ledger VERBATIM — `
++ `accepted, tracked debt, NOT a reason to block; a clean run ships WITH it listed; raise \`risk\` for any rotRisk entry. `
++ `status='blocked' if residuals remain after the convergence cap; 'needs-human' if a criterion is contradictory. `
++ `Evidence:\n${JSON.stringify({ converge: lastA, ledger })}`,
   { label:'ship-gate', phase:'Ship-gate', model:'opus', effort:'high', schema: SHIP_VERDICT })
-
-return verdict
+return verdict || { status:'blocked', criteria:[], gates:[], perTarget:[{target:targets[0].name,green:false,residualFindings:['ship-gate returned no result']}], recommendation:'Re-run the ship-gate.' }
 ```
 
-## Helpers the orchestrator fills in
+## Helpers the orchestrator pastes (part of the frozen mechanism)
 
-- `runReviewTailForTarget(t, profile)` — the pasted `workflow-review-phase` segment for one target: the
-  thermo-nuclear Skill call + the code-review `parallel()` fan-out over `profile.lenses` + triage + fix +
-  re-verify, scoped to `reDeriveDiff(t.repoPath)` and `profile.commands.verify`. It should return at least
-  `{ acceptedCount, green, residualFindings }` so the harness exit predicate can read it.
-- `reDeriveDiff(repoPath)` — **execute** git and return the diff *text* (not a command string). In a
-  worktree, `git add -A` first, then diff against the merge-base:
-  `git -C <repoPath> add -A && git -C <repoPath> diff --staged $(git -C <repoPath> merge-base <base> HEAD)`.
-  Don't combine `--staged` with a three-dot range, and don't pass an un-executed command string into a
-  prompt. Never derive the diff from a fix-agent's reported file list.
-- `implementInDagOrder(targets, sequence, fn)` — run targets with no unmet deps via `parallel()`, then the
-  next wave, etc. With a single target or an empty DAG it's one `parallel()` of one.
+- `implementInDagOrder(targets, sequence, fn)` — run targets with no unmet deps via `parallel()`, then the next
+  wave. One target / empty DAG ⇒ a `parallel()` of one.
+- The disposition cache (`disposed`), the delta cursor (`cursor`), and `lensesFor*` are the v2 mechanism — they
+  are why review cost shrinks each pass and triage stops re-litigating ghosts. Do not "simplify" them away.
 
-### Authoring rules for the emitted script (avoid the common breakages)
+## Authoring rules (v2)
 
-- **Declare every schema you reference, in-file.** A Workflow script is a single module — you cannot
-  `require('./schemas/…')`. Inline the schemas you change; for the ones reused verbatim from
-  `workflow-review-phase` (`FINDINGS`, `TRIAGE`, `FIXED`) paste them once near the top and reference by
-  name, rather than re-inlining their bodies at each use.
-- **Every `phase:` string must be a member of `meta.phases`.** Mismatched phase labels (e.g. `'Review'`
-  vs `'Review · code-review'`) scatter the progress display; pick one set and use it everywhere.
-- **Inline the inputs; don't depend on `args`.** ship-ready authors the script fresh, so bake `prdPath` and
-  `targets` in as literals (the INPUTS block). The Workflow `args` channel crashes the script the instant it
-  arrives stringified or empty (`args.targets` → `undefined.map`), and inlining is resume-safe.
-- **Make Adapt (and any phase) resilient, never fatal.** A transient agent failure — e.g. a 529 overload —
-  must not abort the run: retry, then fall back to a conservative profile with empty `commands`, which keeps
-  the gate from going green so the run ends `blocked`, not crashed and not falsely green. Don't `throw` on a
-  missing `profiles[t.name]`; degrade to a result that *fails* the exit predicate instead.
-- **The exit must be fail-safe.** `clean` requires positive evidence (every target reviewed and gated, tier-0
-  actually run, coverage actually ran). Empty/null results read as NOT clean — remember `[].every()` is
-  `true`, so pair every "all passed" check with a "results actually exist" check.
-- **`needs-human` resumes, not restarts.** When the gate returns `needs-human`, the inline stage asks the
-  user, then relaunches with `Workflow({ scriptPath, resumeFromRunId })` so completed phases replay from
-  cache and only the unresolved tail re-runs.
+- **Fill only the CONFIG block; paste the mechanism verbatim.** This is what makes the loop/predicate/cache
+  reliable and kills the historical footgun class. Don't read from `args`.
+- **Every `phase:` string ∈ `meta.phases`.** The whole convergence loop uses `phase('Converge')`; polish uses
+  `phase('Polish')`. One label set, used everywhere.
+- **The exit is the script's job, fail-safe.** `clean` needs positive evidence (tier-0 actually `passed`,
+  AC tests not failing, `accepted===0`); a null/empty result reads as NOT clean. Remember `[].every()` is `true`,
+  so pair every "all passed" with a "tier-0 actually ran" check.
+- **Completeness is the AC-tagged tests, not a separate opus pass.** Where a criterion is genuinely untestable,
+  it defers to the ship-gate (flagged), it does not silently pass.
+- **Polish never gates and never loops past `POLISH`.** It applies cheap wins and writes the ledger; everything
+  else is advisory. `needs-human` from the ship-gate resumes (`resumeFromRunId`), it doesn't restart.
 
 ## Why the exit is the script's job
 
-Letting a model decide "are we done?" invites optimism — it'll call a 90%-done change shipped. The harness
-computes `clean` from objective signals (triage accepted count, gate pass/fail, uncovered-criteria count),
-so the loop can't terminate on vibes. The ship-gate agent then *explains* the verdict; it doesn't get to
-*invent* a green one. This is the difference between "reviewed once" and "ship-ready."
+A model deciding "are we done?" calls a 90%-done change shipped. The harness computes `clean` from objective
+signals — `accepted===0`, tier-0 `passed`, AC tests not failing — so the loop can't terminate on vibes, and the
+ship-gate *explains* the verdict without getting to *invent* a green one. v2 keeps that and adds: the loop can't
+**waste** either — it reviews only the delta, triages only what's new, and stops the bottomless quality axis from
+holding the cheap correctness axis hostage.

@@ -42,12 +42,17 @@ walks the design tree until shared understanding. Make sure it nails, at minimum
 
 - **Scope & boundaries** — what's in, what's explicitly out. Vague scope is the #1 source of rework.
 - **The target set** — *which repos/services does this touch?* One service? Two services + a mobile app?
-  A shared types package? For each target the grill should establish **where it's checked out** (a path),
-  because Adapt needs to profile each one. If a target repo isn't local, decide now: clone it, or treat it
-  as out-of-scope for this run.
-- **Repo integrity** — does each target build *today*? Note any referenced-but-missing files (an imported
-  module, an auth guard, a build/test config) as in-scope work or a blocker. The classic failure mode is
-  planning as if a skeletal repo compiles, then hitting a tier-0 typecheck wall at the first gate.
+  A shared types package? For each target the grill should establish **where it's checked out** (a path). If a
+  target repo isn't local, decide now: clone it, or treat it as out-of-scope for this run.
+- **The ProjectProfile (detect it here — there is no Adapt phase for single-repo).** You're already reading the
+  repo to grill it, so produce the profile now and inline it into the Workflow CONFIG: stack, package manager,
+  the **gate commands read from CI as ground truth**, **`cmdExists`** (which of those commands actually exist —
+  a missing lint script becomes `not-applicable`, never a phantom gate failure), the sibling modules to mirror
+  (*the code is the convention oracle; CLAUDE.md a hint*), surfaces, and a `file→lens` map. Full shape:
+  `adaptation-layer.md`. Multi-repo: profile what you can here; the Workflow splices a lean Adapt for the rest.
+- **Repo integrity** — does each target build *today* (`buildsClean`)? Note any referenced-but-missing files (an
+  imported module, an auth guard, a build/test config) as in-scope work or a blocker. The classic failure mode
+  is planning as if a skeletal repo compiles, then hitting a tier-0 typecheck wall at the first gate.
 - **The contracts between targets** — if the work spans services, what's the API/event/shared-type shape
   at each seam, and who owns it? (Detail in `multi-repo-contracts.md`.)
 - **Acceptance criteria** — concrete, testable conditions for "done". If the ticket's criteria are vague
@@ -85,7 +90,7 @@ What changes for the user — the intended outcome, not how it's built.
 1. As a <actor>, I want <capability>, so that <benefit>.
 
 ## Acceptance criteria
-EARS form (see below), numbered — the Workflow's coverage gate reads these back to check completeness.
+EARS form (see below), numbered — each becomes ≥1 tagged test the gate runs to check completeness.
 - [ ] **AC1:** WHEN <trigger>, THE SYSTEM SHALL <response>.
 - [ ] **AC2:** IF <condition>, THEN THE SYSTEM SHALL <response>.
 
@@ -100,19 +105,22 @@ Product scope — the repos/services the work spans (the Workflow's Plan turns t
 seam/contracts). One per line: `<name> — <local path> — <surfaces hint>`.
 ```
 
-Then **author the Workflow** with these values **inlined as literals** in its INPUTS block (`prdPath` and
-`targets` are the load-bearing ones; the **PRD file is the source of truth** for criteria and scope). Do
-**not** pass them through the Workflow `args` channel — a stringified or empty `args` crashes the script on
-its first nested access. The values:
+Then **author the Workflow**, filling **only its CONFIG block** with these values as literals (paste the
+mechanism verbatim — see `canonical-workflow.md`). The **PRD file is the source of truth** for criteria and
+scope. Do **not** use the Workflow `args` channel — a stringified/empty `args` crashes the script on first
+access, and inlining is resume-safe. Each target carries the **`profile` you detected at intake** (so there's no
+Adapt phase):
 
 ```jsonc
 {
   "prdPath": ".prd/ACME-412-guest-checkout.md",
-  "title":   "Guest checkout",
-  "source":  "jira", "id": "ACME-412",
-  "targets": [          // from "Systems touched" — drives the Adapt fan-out. One node ⇒ single-repo.
-    { "name": "orders-svc", "repoPath": "/abs/path/orders-svc", "surfacesHint": ["api", "db"] },
-    { "name": "mobile",     "repoPath": "/abs/path/mobile-app",  "surfacesHint": ["ui", "flutter"] }
+  "title":   "Guest checkout", "source": "jira", "id": "ACME-412",
+  "targets": [          // from "Systems touched", each with its intake-detected profile. One node ⇒ single-repo.
+    { "name": "orders-svc", "repoPath": "/abs/path/orders-svc", "surfaces": ["api","db"],
+      "profile": { "commands": {…}, "cmdExists": {…}, "conventions": "mirror …; code wins over CLAUDE.md",
+                   "fileLensMap": [["controller",["api-contract","security"]], …], "buildsClean": true } },
+    { "name": "mobile",     "repoPath": "/abs/path/mobile-app",  "surfaces": ["ui"],
+      "profile": { … } }   // a target you couldn't profile locally ⇒ omit profile; the Workflow's lean Adapt fills it
   ]
 }
 ```
@@ -135,16 +143,19 @@ this is what lets the completeness axis of the loop be machine-checked instead o
 **Example 2 (mobile/UI):** Input: "show a loading state on the profile screen"
 → `AC1: WHILE the profile request is in flight, THE SYSTEM SHALL display a skeleton placeholder and disable the edit button.`
 
-Prefer criteria that map to an observable check (an HTTP response, a rendered state, a row written). Where
-the stack already has e2e/acceptance tests, the gate can assert a real test for the criterion; where it
-doesn't, the ship-gate verifies the criterion against the diff and any unit/integration evidence. (We do
-not *force* writing new acceptance tests — that rigor step was intentionally left optional.)
+Prefer criteria that map to an observable check (an HTTP response, a rendered state, a row written). **Each AC
+becomes ≥1 tagged test assertion** in Implement (name it so the gate can run the AC-tagged tests) — this is how
+completeness is *machine-checked* (the gate runs them per pass) instead of re-judged by an agent every loop, and
+it leaves a durable regression net. Where a criterion genuinely can't be asserted on this stack (e.g. a purely
+visual nuance with no harness), mark it `untestable`: the ship-gate verifies it against the diff and flags it —
+it never silently passes. (This replaces v1's optional-acceptance-tests stance: the AC test *is* the
+completeness gate.)
 
 ### Systems touched → targets (not contracts)
 
-The PRD's **Systems touched** list becomes `targets` in the handle, and drives the Adapt fan-out (a
-ProjectProfile per node) and the per-target implement/review. It is product scope only. The **contracts**
-between systems and the **dependency order** are *derived by the Workflow's Plan* from these targets — they
+The PRD's **Systems touched** list becomes `targets` in the CONFIG (each with its intake-detected `profile`) and
+drives the per-target implement/review. It is product scope only. The **contracts** between systems and the
+**dependency order** are *derived by the Workflow's Plan* from these targets — they
 are HOW, so they stay out of the PRD (see `multi-repo-contracts.md`). One target ⇒ no contracts/DAG, and
 every multi-repo step degenerates to its single-repo form.
 

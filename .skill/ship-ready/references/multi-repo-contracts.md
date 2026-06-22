@@ -11,9 +11,11 @@ against it independently.**
 The "WorkGraph" is the targets + contracts + dependency order. It isn't one pre-baked object — it's assembled
 in two places, matching the WHAT/HOW split:
 
-- **`targets`** — one node per repo/service, each with a `repoPath` and `surfacesHint`. Comes from the
-  **PRD's *Systems touched*** (product scope; see `intake-and-spec.md`) and reaches the Workflow as
-  `args.targets`. Drives the Adapt fan-out (a ProjectProfile each) and the per-target implement/review.
+- **`targets`** — one node per repo/service, each with a `repoPath`, `surfaces`, and the **`profile` detected at
+  intake**. Comes from the **PRD's *Systems touched*** (product scope; see `intake-and-spec.md`) and is **inlined
+  into the Workflow CONFIG block** (not the `args` channel). Drives the per-target implement/review. Single-repo
+  targets are fully profiled at intake (no Adapt phase); a target you couldn't profile locally omits `profile`
+  and the Workflow splices a lean parallel Adapt for it.
 - **`contracts`** — the seams between targets: an API path (OpenAPI/GraphQL/gRPC), an event/message payload
   (AsyncAPI/Avro/JSON-schema), or a shared type/DTO, each naming the targets it spans and an `owner`.
   **Derived by the Workflow's Plan** (that's HOW) — deliberately not in the PRD.
@@ -92,7 +94,8 @@ A single-repo feature is just a WorkGraph with **one node, no contracts, an empt
 
 - the contract plan is a no-op (`contracts:[]`, trivial sequence),
 - there's no integration lens and no integration gate,
-- the Adapt/Plan/Implement/Review fan-outs are each a `parallel()` of one.
+- the Plan/Implement/Review fan-outs are each a `parallel()` of one (and there's no Adapt phase — the single
+  target is profiled at intake).
 
 So the multi-repo machinery **disappears cleanly** for the common case — you don't pay for it when you don't
 need it, and there's no separate single-repo code path to maintain. The same script handles "add a button"
