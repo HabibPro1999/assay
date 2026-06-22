@@ -38,7 +38,7 @@ feature spanning several — same skill, no hardcoded stack.
 
 | Stage | Who | What happens |
 |---|---|---|
-| **1 · Intake & Grill** | 🧑 human | Pull context from the ticket/request, then run [`grill-me`](#dependencies) to interview the request to **zero ambiguity** — scope, the repos/services touched, whether each one actually builds today, the contracts between them, and testable acceptance criteria. Synthesize a lean **PRD** (pure *what*, not *how*) with criteria in **EARS** form and save it to `.prd/<slug>.md`. |
+| **1 · Intake & Grill** | 🧑 human | Pull context from the ticket/request, then run [`grill-me`](#whats-in-the-box) to interview the request to **zero ambiguity** — scope, the repos/services touched, whether each one actually builds today, the contracts between them, and testable acceptance criteria. Synthesize a lean **PRD** (pure *what*, not *how*) with criteria in **EARS** form and save it to `.prd/<slug>.md`. |
 | **2 · Workflow** | 🤖 autonomous | One Workflow runs **Adapt → Plan → Research → Implement → ⟲ Review-loop → Ship-gate**. It can't stop to ask a question — that's *why* the grill comes first. |
 | **3 · Confirm & Ship** | 🧑 human | Present the structured `ShipVerdict`. Only with an explicit go: commit / push / open a PR, and write back to the ticket. |
 
@@ -98,27 +98,43 @@ the same script handles "add a button" and "ship a feature across three services
 
 ---
 
+## What's in the box
+
+The whole skill stack is **bundled under [`.skill/`](.skill)** so it installs in one move — ship-ready
+plus the four skills it hard-depends on, and `imagegen` (used to draw these diagrams).
+
+<div align="center">
+<img src="assets/05-bundle.png" alt="ship-ready bundles its dependency skills; Context7 and code-review are referenced, not redistributed" width="720">
+</div>
+
+| Bundled in `.skill/` | Role |
+|---|---|
+| `ship-ready` | the orchestrator |
+| `grill-me` + `grilling` | the requirements interview that kills ambiguity up front |
+| `workflow-review-phase` | the review→triage→fix segment spliced into the loop |
+| `thermo-nuclear-code-quality-review` | the maintainability/abstraction lens |
+| `imagegen` | generates the explanatory diagrams (handy, not a runtime dep) |
+
+Two dependencies are **referenced, not bundled** — install them separately:
+
+- **Context7** — an MCP (`mcp__plugin_context7_context7__*`) for current best-practice docs of the libraries
+  actually in use. Add it to your MCP config.
+- **`/code-review`** — Anthropic's official Claude Code plugin (the engine `workflow-review-phase` reproduces).
+  It ships with Claude Code, so it's not redistributed here.
+
+Everything else (Pact, Specmatic, other skill ecosystems) is **detect-and-use-if-present**, never installed —
+over-skilling bloats every session and causes mis-triggering.
+
 ## Install
 
 ```bash
-git clone https://github.com/HabibPro1999/ship-ready.git ~/.claude/skills/ship-ready
+git clone https://github.com/HabibPro1999/ship-ready.git
+cp -R ship-ready/.skill/* ~/.claude/skills/   # install ship-ready + its bundled deps
 ```
 
 ship-ready is `disable-model-invocation: true` — **the user** starts it with `/ship-ready`; the model can't
 auto-launch it. Invoke it to *build, implement, ship, deliver, or finish* a feature, or to work a ticket end
 to end (e.g. `"build the X feature"`, `"work ABC-123"`, `"take this to a merge-ready PR"`).
-
-## Dependencies
-
-Deliberately lean. Hard dependencies (all installable Claude Code skills / MCPs):
-
-- **`grill-me` + `grilling`** — the requirements interview.
-- **Context7** (MCP) — current best-practice docs for the libraries actually in use.
-- The review stack — **`workflow-review-phase`**, **`thermo-nuclear-code-quality-review`**, and the
-  **`/code-review`** engine it reproduces.
-
-Everything else (Pact, Specmatic, other skill ecosystems) is **detect-and-use-if-present**, never installed —
-over-skilling bloats every session and causes mis-triggering.
 
 ## Guardrails (load-bearing — don't remove)
 
@@ -134,14 +150,31 @@ over-skilling bloats every session and causes mis-triggering.
 
 ```
 ship-ready/
-├── SKILL.md                       # the orchestrator: the shape, the gate, the guardrails
-├── references/
-│   ├── intake-and-spec.md         # grill handoff, ticket adapters, PRD + EARS criteria
-│   ├── adaptation-layer.md        # project detection, CI-as-truth, surface→lens, tiered gates
-│   ├── canonical-workflow.md      # the full Workflow script template + schemas + model tiers
-│   └── multi-repo-contracts.md    # contract-first planning across repos/services
-└── assets/                        # the diagrams above
+├── README.md
+├── assets/                                  # the diagrams above
+└── .skill/                                  # the installable bundle
+    ├── ship-ready/
+    │   ├── SKILL.md                         # the orchestrator: the shape, the gate, the guardrails
+    │   └── references/
+    │       ├── intake-and-spec.md           # grill handoff, ticket adapters, PRD + EARS criteria
+    │       ├── adaptation-layer.md          # project detection, CI-as-truth, surface→lens, gates
+    │       ├── canonical-workflow.md        # the Workflow script template + schemas + model tiers
+    │       └── multi-repo-contracts.md      # contract-first planning across repos/services
+    ├── grill-me/ · grilling/                # the requirements interview
+    ├── workflow-review-phase/               # the spliced review→triage→fix segment
+    ├── thermo-nuclear-code-quality-review/  # the maintainability lens
+    └── imagegen/                            # diagram generation
 ```
+
+## Credits & prior art
+
+ship-ready stands on the shoulders of **[Matt Pocock](https://github.com/mattpocock)** and his
+[`mattpocock/skills`](https://github.com/mattpocock/skills) ("Skills for Real Engineers"). Several patterns
+encoded here are reactions to — and refinements of — his skills: ship-ready writes its own *product* PRD
+rather than the *technical* one his [`to-prd`](https://github.com/mattpocock/skills) produces (so planning
+happens once, in the Workflow), and it folds the spirit of his `tdd` (red-green-refactor) and
+`diagnosing-bugs` (reproduce → root-cause → regression-test) loops directly into the implement and review
+stages instead of pulling them in as separate skills. Credit where due — go star his repo.
 
 ## License
 
