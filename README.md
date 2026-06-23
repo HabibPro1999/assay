@@ -92,7 +92,7 @@ the review lenses and the gates:
 | Surface | Adds lenses | Adds gates |
 |---|---|---|
 | api | `api-contract` | contract tests if present |
-| ui | `a11y`, `visual/state` | build + boot/route smoke |
+| ui | `a11y`, `visual-state` | build + boot/route smoke |
 | db | `data-integrity` | integration if present |
 | infra | `infra-safety` | plan/dry-run if present |
 | *multi-repo* | `integration` (cross-target contract conformance) | contract/e2e across targets |

@@ -45,7 +45,7 @@ Precedence, per target: **config file → auto-detect → ask only on genuine am
   "surfaces": ["api", "db"],                          // drives the lap-1 lens set
   "fileLensMap": [                                    // delta laps: changed-file path-substr → lenses to re-run
     ["controller", ["api-contract", "security"]], ["schema", ["data-integrity"]],
-    ["migration", ["data-integrity"]], ["", ["bugs"]]
+    ["migration", ["data-integrity"]], ["test", ["test-integrity"]], ["spec", ["test-integrity"]], ["", ["bugs"]]
   ],
   "buildsClean": true,                                // did the tree typecheck BEFORE our change?
   "preflightWarnings": ["imports ./orders.service (file absent)", "build needs tsconfig.build.json (absent)"]
@@ -112,7 +112,9 @@ commands exist and CI doesn't disambiguate, that's an *ask* (§6).
 Load `CLAUDE.md` at the repo root **and** in any directory the change touches (nested CLAUDE.md override),
 plus `.editorconfig`, the lint config (eslint/biome/ruff/clippy/golangci-lint), the formatter
 (prettier/black/rustfmt/`dart format`/gofmt), and commit conventions (`commitlint`, a `CONTRIBUTING.md`).
-These feed both the implement phase (write code that matches) and the `claude-md` review lens.
+These feed the **implement phase** (write code that matches) — convention-following is *prevention*, not a gate
+lens. Any doc/comment **drift** the code later contradicts surfaces as an advisory note in Mechanism B, never as
+a blocking finding (the `claude-md` lens is cut from the gate — see §4).
 
 ### Surfaces
 Infer the work's surfaces from dependencies + directory shape — they decide the lenses and the UI gates:
@@ -153,10 +155,10 @@ convention-following moves to *prevention*:
 
 | Bucket | Lenses | When (lap-1) |
 |---|---|---|
-| **Core** (change-intrinsic) | `bugs`; `api-contract` | always; `api-contract` if `api` |
-| **Insurance** (surface-gated, high blast-radius) | `security`, `data-integrity`, `concurrency` | auth/money/public · db/migration · txn/async surfaces |
+| **Core** (change-intrinsic) | `bugs`; `test-integrity`; `api-contract` | `bugs`+`test-integrity` always; `api-contract` if `api` |
+| **Insurance** (surface-gated, high blast-radius) | `security`, `data-integrity`, `concurrency`, `infra-safety` | auth/money/public · db/migration · txn/async · infra surfaces |
 | **Conditional** | `git-history` | only on hunks that **modify pre-existing** code |
-| **UI / library / infra** | `a11y`+`visual/state` · `public-api` · `infra-safety` | the matching surface |
+| **UI / library** | `a11y`+`visual-state` · `public-api` | the matching surface |
 | **Multi-repo** | `integration` (cross-target contract conformance) | spans ≥2 targets |
 | **Polish (advisory, Mechanism B — never gates)** | `thermo-nuclear`, `yagni`, `doc-drift` | once, after convergence |
 
@@ -196,7 +198,12 @@ Each command resolves to one of `passed / failed / skipped / not-applicable`:
 - **Tier 0 (always):** typecheck/compile, lint, format-check, unit tests.
 - **Completeness — the AC-tagged tests** (`commands.acTests`): run them and report per-AC `passed / failing /
   untestable`. This *is* the completeness check — no separate coverage agent. Untestable ACs defer to the
-  ship-gate (flagged), they never silently pass.
+  ship-gate (flagged), they never silently pass. Two guards keep the completeness oracle honest, because the
+  *same* agent writes both the AC and its test: a **`test-integrity`** lens (lap-1 always; re-run on any
+  changed test/spec file) audits that each `@AC` test actually exercises its criterion — a tautological or
+  self-referential assertion becomes a triage finding, not a free green; and if more than `MAX_UNTESTABLE_RATIO`
+  (~⅓) of ACs are marked `untestable`, the script downgrades a `ship` verdict to `needs-human` so the escape
+  hatch is bounded, not unlimited.
 - **Tier 1 (if present):** integration, contract tests.
 - **Tier 2 (if present):** e2e; for `ui`, a production build **plus** a boot/route smoke (browser MCP).
 

@@ -120,9 +120,11 @@ again.** What makes it converge fast *and* without waste:
   **only the files the last fix changed**, with **only the lenses whose surface those files touch.** (A DRY-only
   fix re-runs no security/data reviewers.) Review is `parallel()` in the script; thermo-nuclear is **not** in
   this loop (it's Mechanism B).
-- **Reality-anchored lenses only.** `bugs` always; `api-contract`/`security`/`data-integrity`/`concurrency`
-  surface-gated; `git-history` only on modified pre-existing code. The artifact-anchored lenses are gone from
-  the gate (see *Guardrails*).
+- **Reality-anchored lenses only.** `bugs` and `test-integrity` always; `api-contract`/`security`/`data-integrity`/
+  `concurrency`/`infra-safety` surface-gated; `a11y`/`visual-state`/`public-api` on the matching surface;
+  `git-history` only on modified pre-existing code; `integration` across targets when multi-repo. The
+  artifact-anchored lenses are gone from the gate (see *Guardrails*). Every emitted lens key is defined once in
+  the script's `LENS_DEF` registry, so the review prompt carries real oracle guidance, not a bare adjective.
 - **Incremental triage with memory.** A `disposed` cache carries verdicts across passes; **only new findings
   reach triage.** This stops the loop re-litigating the same nits (and re-accepting a finding it earlier
   rejected). **Triage is the gate** — keyed off `accepted == 0`, never a confidence score.
@@ -172,8 +174,16 @@ cheap. Escalate mid-loop if signal demands it.
   `prior-prs` (unrelated/hallucinated in a team), `code-comments` (comments rot), and `claude-md` *as a gate*
   (docs lag the code). Enforce conventions by **prevention** (Implement mirrors the sibling code; code wins over
   CLAUDE.md); surface doc/comment **drift** as an advisory note, not a finding.
-- **Completeness is test-backed.** Each AC has ≥1 tagged assertion; the gate runs them. Untestable criteria defer
+- **Completeness is test-backed — and the tests are audited.** Each AC has ≥1 tagged assertion; the gate runs
+  them. Because the same agent writes the code *and* the test, a `test-integrity` lens checks each `@AC` test
+  actually exercises its criterion (a tautology becomes a triage finding), and the `untestable`-AC ratio is
+  capped: past `MAX_UNTESTABLE_RATIO` the script downgrades `ship` to `needs-human`. Untestable criteria defer
   to the ship-gate, flagged — never a silent pass.
+- **A blocking mid-build unknown is asked, not guessed.** The grill kills *known* ambiguity up front; an
+  irreversible or product-semantic unknown *discovered* during plan/implement that the PRD doesn't resolve
+  returns a `needs-human` verdict with the question **immediately** (carrying `resumeFromRunId`), instead of
+  guessing or deferring to the end. Reversible, non-semantic choices are resolved from the sibling code and
+  flagged with a `ponytail:` marker.
 - **The gate is mechanical and honest about N/A.** Real commands run; the script computes `green`; a command that
   doesn't exist is `not-applicable` (never blocks); a tier-0 command the env can't run is `failed` (never green).
 - **Re-derive the diff from git each pass.** Trust git, not a fix-agent's reported file list. In a worktree,
