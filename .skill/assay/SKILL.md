@@ -136,7 +136,8 @@ again.** What makes it converge fast *and* without waste:
   fix re-runs no security/data reviewers.) Review is `parallel()` in the script; thermo-nuclear is **not** in
   this loop (it's Mechanism B).
 - **Reality-anchored lenses only.** The five `/code-review` correctness angles `angle-A`…`angle-E` and
-  `test-integrity` are the always-on core (every pass, every target, every lap); `security`/`data-integrity`/
+  `test-integrity` are the always-on core (every *reviewing* pass — any non-empty delta — every target; an
+  empty-delta pass, where the last fix changed nothing, skips review and runs gate-only); `security`/`data-integrity`/
   `concurrency`/`infra-safety`/`api-contract`/`public-api` are SMART-selected by a static surface/`fileLensMap`
   **floor** (fail-safe) UNION a cheap **lens-router** that may only ADD to the floor, never remove; `public-api`
   on the library surface; `integration` across targets when multi-repo. `a11y`/`visual-state`/`git-history` are

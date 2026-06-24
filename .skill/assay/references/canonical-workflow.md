@@ -57,7 +57,7 @@ autonomous agent that hits a genuinely irreversible/product-semantic unknown sto
 | Research | sonnet (+Context7) | Doc synthesis. |
 | Implement | **opus** | Codegen quality is the product; mirrors sibling code, writes AC tests. |
 | Review · lens-router | sonnet · **low effort** | Cheap ADD-only specialist selector; reads the change, extends the floor, never gates. |
-| Review · angle-A…E (always-on correctness core) / test-integrity | sonnet | A–E technique angles + completeness, every pass, every target, every lap. |
+| Review · angle-A…E (always-on correctness core) / test-integrity | sonnet | A–E technique angles + completeness, every *reviewing* pass (any non-empty delta), every target (an empty-delta pass is gate-only). |
 | Review · api-contract / public-api | sonnet | Surface-gated specialists; breadth on the change. |
 | Review · security / data-integrity / concurrency / infra-safety / integration | **opus** | Subtle, high-blast-radius — floor- or router-selected on the relevant surface. |
 | Triage | **opus** | The gate — decides what changes. Only *new* findings. |
@@ -75,7 +75,7 @@ registry** in the script — the docs describe that registry, they don't indepen
 
 | Bucket | Lenses | When |
 |---|---|---|
-| **Correctness core** (always-on) | `angle-A`…`angle-E` (the five `/code-review` technique angles, verbatim) | EVERY pass, EVERY target, every lap — they replace the old vague `bugs` lens |
+| **Correctness core** (always-on) | `angle-A`…`angle-E` (the five `/code-review` technique angles, verbatim) | EVERY pass **that reviews a delta**, EVERY target — they replace the old vague `bugs` lens (an empty-delta pass reviews nothing and goes straight to the gate, so there is no byte-identical re-review) |
 | **Completeness core** (always-on) | `test-integrity` | always (completeness is always gated) |
 | **Specialists** (SMART-selected) | `security`, `data-integrity`, `concurrency`, `infra-safety`, `api-contract`, `public-api` | the static **floor** (surface/`fileLensMap`) UNION the cheap **lens-router**'s ADD-only picks |
 | **Multi-repo** | `integration` (cross-target contract conformance) | spans ≥2 targets — runs once per round, after the per-target passes |
@@ -217,7 +217,8 @@ async function aretry(prompt, opts, tries=3) {        // one transient 529 must 
 }
 
 // ── CORRECTNESS_ANGLES: the FIVE /code-review technique angles, VERBATIM from code-review-engine-2.1.186.md.
-//    Always-on core — they run on EVERY pass, EVERY target, every lap. They REPLACE the old single vague 'bugs' lens. ──
+//    Always-on core — they run on EVERY reviewing pass (any non-empty delta), EVERY target. They REPLACE the old single vague 'bugs' lens.
+//    (An empty-delta pass — the last fix changed nothing — skips review entirely and goes straight to the gate; nothing is re-reviewed byte-for-byte.) ──
 const CORRECTNESS_ANGLES = {
   'angle-A':'Read every hunk in the diff, line by line. Then Read the enclosing function for each hunk — bugs in unchanged lines of a touched function are in scope (the PR re-exposes or fails to fix them). For every line ask: what input, state, timing, or platform makes this line wrong? Look for inverted/wrong conditions, off-by-one, null/undefined deref, missing `await`, falsy-zero checks, wrong-variable copy-paste, error swallowed in catch, unescaped regex metachars.',
   'angle-B':'For every line the diff DELETES or replaces, name the invariant or behavior it enforced, then search the new code for where that invariant is re-established. If you can\'t find it, that\'s a candidate: a removed guard, a dropped error path, a narrowed validation, a deleted test that was covering a real case.',
@@ -340,53 +341,71 @@ async function convergeTarget(t, disposed, cursorMap, pass) {
   const cursor = cursorMap.get(t.name)
 
   // STAGE + derive the diff to review. Pass 1 for this target: whole change. Pass 2+: ONLY what its last fix changed.
+  // The delta cursor is a `git write-tree` SNAPSHOT, not HEAD: converge NEVER commits (every fix says "do NOT commit"),
+  // so HEAD is frozen at the pre-build commit and "diff vs HEAD" would re-derive the WHOLE change every pass. A
+  // write-tree of the staged index is a stable tree marker that advances as the working tree changes — diffing the
+  // NEXT pass against it yields exactly what the last fix touched, which is the whole point of delta-scoping.
   const view = await aretry(
-    `In ${t.repoPath}: \`git add -A\`, then return (a) the full staged file list, and (b) the files `
-  + (cursor ? `changed SINCE ${cursor} (this target's last fix).` : `(first pass for this target — all staged files).`)
-  + ` Read-only except the add. Return {changedFiles:[...], head:'<sha>'}.`,
+    `In ${t.repoPath}: run \`git add -A\` (stage the in-progress change; do NOT commit). Then return `
+  + `(a) changedFiles — the files `
+  + (cursor ? `the last fix touched, via \`git diff --name-only ${cursor}\` (compares the prior snapshot tree to the working tree). `
+            : `in the whole staged change, via \`git diff --name-only HEAD\` (first pass for this target). `)
+  + `and (b) snapshot — the exact output of \`git write-tree\` (a tree SHA of the CURRENT staged index; it does NOT commit, `
+  + `does NOT move HEAD, and creates only a dangling tree object — it is the marker the NEXT pass diffs against). `
+  + `Read-only except the \`git add -A\`. Return {changedFiles:[...], snapshot:'<tree-sha>'}.`,
     { label:`stage:${t.name}:${pass}`, phase:'Converge', model:'haiku', effort:'low',
-      schema:{type:'object',additionalProperties:false,required:['changedFiles','head'],
-        properties:{changedFiles:{type:'array',items:{type:'string'}},head:{type:'string'}}} })
+      schema:{type:'object',additionalProperties:false,required:['changedFiles','snapshot'],
+        properties:{changedFiles:{type:'array',items:{type:'string'}},snapshot:{type:'string'}}} })
   const changed = (view && view.changedFiles) || []
 
-  // REVIEW — SMART selection: static FLOOR (fail-safe) UNION the cheap router's ADD-only specialist picks; A–E + test-integrity always.
-  const floorSet = cursor ? lensesForFiles(changed, t.profile) : lensesFor(t.surfaces)
-  const routerAdd = await routeLenses(t, changed, floorSet, plan, pass)   // ADD-only; floor never reduced
-  const lenses = unionLenses(floorSet, routerAdd)                          // [{key,model}] core + floor specialists + router specialists
-  const skipList = [...disposed.keys()].slice(0, 120)
-  const reviewed = await parallel(lenses.map(l => () => agent(
-    `Review ${cursor?'ONLY these changed files: '+JSON.stringify(changed):'the staged change'} in ${t.repoPath} `
-  + `through the ${l.key} lens — ${CORRECTNESS_ANGLES[l.key] || (LENS_DEF[l.key]+' '+SPECIALIST_METHOD)}. `
-  + `Judge the CODE against execution semantics (not docs/comments, which rot). `
-  + `Each finding's failure_scenario must be the USER-VISIBLE consequence (an error, wrong output, or data loss), `
-  + `NOT an intermediate state (a value going stale, a set growing). Pass every candidate with a nameable failure `
-  + `scenario through — do not pre-drop half-believed candidates; an independent verifier judges them next. `
-  + `Do NOT re-report anything matching these already-decided items: ${JSON.stringify(skipList)}. `
-  + `Empty findings is a good result; verify framework defaults before asserting (e.g. status codes).`,
-    { label:`review:${l.key}:${t.name}:${pass}`, phase:'Converge', model:l.model, effort:l.model==='opus'?'high':'medium', schema: FINDINGS })))
-  let fresh = reviewed.filter(Boolean).flatMap(r=>r.findings||[]).filter(f => !disposed.has(dispKey(f)))
+  // EARLY-OUT — on a DELTA pass (cursor set) whose last fix changed NOTHING, the code is byte-identical to what
+  // was already reviewed: re-running the fan-out is guaranteed-0 waste. Skip review/router/verify/sweep; still run
+  // the mechanical gate below so `clean` stays honest (the GATE, not the review, is the source of truth for green).
+  // Lap-1 (cursor === null) is never an empty delta, so the full pass + sweep always runs at least once.
+  const emptyDelta = !!cursor && changed.length === 0
+  if (emptyDelta) log(`converge ${t.name} pass ${pass}: empty fix-delta — review skipped, gate only`)
 
-  // VERIFY — 3-state recall-biased pre-filter (CONFIRMED/PLAUSIBLE kept, REFUTED dropped). GATED: it is a scalable
-  // pre-filter, NOT the precision gate (triage is). Run on lap-1 (whole change) and on LARGE delta laps; SKIP small
-  // delta laps where the candidate set is already tiny and triage alone is cheap enough.
-  const runVerify = !cursor || changed.length > SMALL_DELTA
-  if (runVerify && fresh.length) fresh = await verifyCandidates(fresh, t.repoPath, `verify:${t.name}:${pass}`)
+  let fresh = []
+  if (!emptyDelta) {
+    // REVIEW — SMART selection: static FLOOR (fail-safe) UNION the cheap router's ADD-only specialist picks; A–E + test-integrity always.
+    const floorSet = cursor ? lensesForFiles(changed, t.profile) : lensesFor(t.surfaces)
+    const routerAdd = await routeLenses(t, changed, floorSet, plan, pass)   // ADD-only; floor never reduced
+    const lenses = unionLenses(floorSet, routerAdd)                          // [{key,model}] core + floor specialists + router specialists
+    const skipList = [...disposed.keys()].slice(0, 120)
+    const reviewed = await parallel(lenses.map(l => () => agent(
+      `Review ${cursor?'ONLY these changed files: '+JSON.stringify(changed):'the staged change'} in ${t.repoPath} `
+    + `through the ${l.key} lens — ${CORRECTNESS_ANGLES[l.key] || (LENS_DEF[l.key]+' '+SPECIALIST_METHOD)}. `
+    + `Judge the CODE against execution semantics (not docs/comments, which rot). `
+    + `Each finding's failure_scenario must be the USER-VISIBLE consequence (an error, wrong output, or data loss), `
+    + `NOT an intermediate state (a value going stale, a set growing). Pass every candidate with a nameable failure `
+    + `scenario through — do not pre-drop half-believed candidates; an independent verifier judges them next. `
+    + `Do NOT re-report anything matching these already-decided items: ${JSON.stringify(skipList)}. `
+    + `Empty findings is a good result; verify framework defaults before asserting (e.g. status codes).`,
+      { label:`review:${l.key}:${t.name}:${pass}`, phase:'Converge', model:l.model, effort:l.model==='opus'?'high':'medium', schema: FINDINGS })))
+    fresh = reviewed.filter(Boolean).flatMap(r=>r.findings||[]).filter(f => !disposed.has(dispKey(f)))
 
-  // SWEEP — lap-1 ONLY: one fresh gap-only finder for what the angled pass tends to miss; its candidates are ALSO
-  // verified, then merged into the fresh set (triage's dispKey dedup absorbs any overlap). No synthesize stage.
-  if (!cursor) {
-    const already = fresh.map(f => `${f.file}:${f.line||''} — ${f.title||f.summary||''}`).slice(0, 120)
-    const swept = await aretry(
-      `Re-read the staged diff in ${t.repoPath} and its enclosing functions looking ONLY for defects NOT already listed.\n`
-    + `Already-found (do NOT re-derive or re-confirm): ${already.length?JSON.stringify(already):'(none)'}.\n`
-    + `Focus on what the first pass misses: moved/extracted code that dropped a guard or anchor; second-tier footguns `
-    + `(default evaluated once, hash() non-determinism, lock-scope shrink, predicate methods with side effects); `
-    + `setup/teardown asymmetry in tests; config defaults flipped. Surface up to ${SWEEP_MAX} additional findings; `
-    + `if nothing new, return an empty list — do not pad.`,
-      { label:`sweep:${t.name}:${pass}`, phase:'Converge', model:'sonnet', effort:'medium', schema: FINDINGS })
-    const sweepFresh = ((swept&&swept.findings)||[]).slice(0, SWEEP_MAX).filter(f => !disposed.has(dispKey(f)))
-    const sweepKept = sweepFresh.length ? await verifyCandidates(sweepFresh, t.repoPath, `verify:sweep:${t.name}:${pass}`) : []
-    fresh = fresh.concat(sweepKept)
+    // VERIFY — 3-state recall-biased pre-filter (CONFIRMED/PLAUSIBLE kept, REFUTED dropped). GATED: it is a scalable
+    // pre-filter, NOT the precision gate (triage is). Run on lap-1 (whole change) and on LARGE delta laps; SKIP small
+    // delta laps where the candidate set is already tiny and triage alone is cheap enough.
+    const runVerify = !cursor || changed.length > SMALL_DELTA
+    if (runVerify && fresh.length) fresh = await verifyCandidates(fresh, t.repoPath, `verify:${t.name}:${pass}`)
+
+    // SWEEP — lap-1 ONLY: one fresh gap-only finder for what the angled pass tends to miss; its candidates are ALSO
+    // verified, then merged into the fresh set (triage's dispKey dedup absorbs any overlap). No synthesize stage.
+    if (!cursor) {
+      const already = fresh.map(f => `${f.file}:${f.line||''} — ${f.title||f.summary||''}`).slice(0, 120)
+      const swept = await aretry(
+        `Re-read the staged diff in ${t.repoPath} and its enclosing functions looking ONLY for defects NOT already listed.\n`
+      + `Already-found (do NOT re-derive or re-confirm): ${already.length?JSON.stringify(already):'(none)'}.\n`
+      + `Focus on what the first pass misses: moved/extracted code that dropped a guard or anchor; second-tier footguns `
+      + `(default evaluated once, hash() non-determinism, lock-scope shrink, predicate methods with side effects); `
+      + `setup/teardown asymmetry in tests; config defaults flipped. Surface up to ${SWEEP_MAX} additional findings; `
+      + `if nothing new, return an empty list — do not pad.`,
+        { label:`sweep:${t.name}:${pass}`, phase:'Converge', model:'sonnet', effort:'medium', schema: FINDINGS })
+      const sweepFresh = ((swept&&swept.findings)||[]).slice(0, SWEEP_MAX).filter(f => !disposed.has(dispKey(f)))
+      const sweepKept = sweepFresh.length ? await verifyCandidates(sweepFresh, t.repoPath, `verify:sweep:${t.name}:${pass}`) : []
+      fresh = fresh.concat(sweepKept)
+    }
   }
 
   // TRIAGE = THE GATE — only verify-survivors (+ verified sweep) reach it. Record every verdict into the disposition cache.
@@ -420,7 +439,7 @@ async function convergeTarget(t, disposed, cursorMap, pass) {
   const gatesGreen = tier0Ran && gs.every(g => g.status==='passed' || g.status==='not-applicable' || (g.status==='skipped' && g.tier!==0))
   const ac = gate && gate.acTests
   const complete = !!ac && (ac.failing||[]).length===0       // untestable ACs defer to the ship-gate, don't block here
-  if (view && view.head) cursorMap.set(t.name, view.head)
+  if (view && view.snapshot) cursorMap.set(t.name, view.snapshot)   // advance the delta cursor to this pass's write-tree snapshot
   return { target:t.name, accepted, gate, acTests: ac, gatesGreen, complete,
            clean: accepted.length===0 && gatesGreen && complete }
 }
@@ -509,7 +528,7 @@ if (blocking.length) {
 // ══════════ MECHANISM A — converge correctness + completeness, PER TARGET + integration (BLOCKING) ══════════
 const disposed   = new Map(targets.map(t => [t.name, new Map()]))   // per-target: dispKey → {verdict} (paths collide across repos)
 const integDisp  = new Map()                                        // integration findings (multi-repo)
-const cursorMap  = new Map(targets.map(t => [t.name, null]))        // per-target delta cursor
+const cursorMap  = new Map(targets.map(t => [t.name, null]))        // per-target delta cursor (a write-tree snapshot, advances each pass)
 const converged  = new Set()
 let pass = 0, lastByTarget = {}, integLast = { accepted: [] }
 while (true) {
@@ -618,7 +637,11 @@ return v
   per-target Implement output (and the open-question channel). **It now has a real body — do not re-derive it.**
 - `convergeTarget(t, disposed, cursorMap, pass)` — one Mechanism-A pass (stage → review → triage → fix → gate)
   for a single target; returns `{accepted, gate, acTests, gatesGreen, complete, clean}`. The loop runs it once
-  per unconverged target each round.
+  per unconverged target each round. **The delta cursor is a `git write-tree` snapshot, not `HEAD`** — converge
+  never commits, so `HEAD` is frozen and a HEAD-diff would re-derive the WHOLE change every pass; the snapshot
+  advances as the working tree changes, so pass 2+ reviews only the last fix's delta. **A delta pass with an empty
+  delta (the last fix changed nothing) skips the review fan-out entirely and runs only the gate** — re-reviewing
+  byte-identical code is guaranteed-0; the gate still decides `clean`.
 - `integrationPass(targets, contracts, disposed)` — the multi-repo seam review→triage→fix; an accepted seam fix
   un-converges the sides so they re-gate. No-op path for single-repo (never called when `!multiRepo`).
 - The per-target disposition caches (`disposed`), per-target delta cursors (`cursorMap`), `converged` set, the
